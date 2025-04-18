@@ -8,148 +8,143 @@
 #include <EEPROM.h>
 #include "ADC.h"
 
-// I2C Addresses
-#define I2CADDR 0x26
-#define ADC_I2C_ADDRESS 0x24
-#define PIN_DATA 10
+// ——— GLOBALS & CONSTANTS ———
 
-// Pin definitions
-const int LED = 5;
-const int ThermistorPin = A1;
-const int PumpPin = A0;
-#define SensorPin A4
-const int tankSensorPin = A2;  // Tank level sensor
+// I²C Addresses
+#define I2CADDR         0x26   //Lcd
+#define ADC_I2C_ADDRESS 0x24   // i2c pH Probe
+#define PIN_DATA         10    // DHT22 data pin (if used)
 
-// Process and calibration variables stored in EEPROM addresses:
-const int mixTimeAddress = 8;
-const int ToleranceAddress = 12;
+// Analog pins
+const int SensorPin        = A5;  // analog pH sensor input (if used)
+const int tankSensorPin    = A3;  // Tank level sensor
+
+// Digital pins
+const int PumpPin          = A0;
+const int LED              = 5;
+const int ThermistorPin    = A1;
+
+// EEPROM addresses
+const int mixTimeAddress      = 8;
+const int ToleranceAddress    = 12;
 const int DoseDurationAddress = 16;
+const int tankCheckAddress    = 20;
+
+// Moving‑average window
+#define WINDOW_SIZE 5
+
+// ADC (pH module) settings
+static const float adc_vref = 5.0f; // Correct ADC reference to 5.0V
+static const float   adc_offset   = 0.0f;
+static const uint8_t i2c_addr     = ADC_I2C_ADDRESS;
+static const uint16_t eoc_to      = 300;
+
+// Calibration & live readings
+float slope, offset, pHTarget;
+float pHValue;
+float pHVoltages[WINDOW_SIZE];
+int   INDEX = 0;
+float pHavg[10];
+float avgValue = 0.0f;
+
+// Thermistor constants & live temp
+const float R1 = 10000.0f,
+            c1 = 0.0012400f,
+            c2 = 0.000209125f,
+            c3 = 0.0000002956720f;
+float Tc, Tempoffset;
+int   Vo;
+float R2, logR2, Tcalc;
+
+// Tank‑level enforcement
+bool enforceTankLevel = true;
+
+// Process parameters (loaded from EEPROM)
 int MixTime;
 int DoseDuration;
 float pHTolerance;
 
-// Sampling parameters
-const int WINDOW_SIZE = 5;    // pH sensor circular buffer size
-const int WINDOW_SIZE2 = 30;  // (Not used in this version)
-unsigned long samplingTime = 5;
+// Tank‑sensor constants for smoothing
+const float MAX_TANK_HEIGHT = 0.10f,
+            SENSOR_OFFSET_V = 0.5f,
+            SENSOR_SPAN_V   = 4.0f,
+            SENSOR_MAX_P    = 0.5f,
+            ALPHA           = 0.10f,
+            ADC_REF_V       = 5.0f;
 
-// I2C pH Module settings and conversion factor
-static const float adc_vref = 2.5;
-static const uint8_t i2c_address = ADC_I2C_ADDRESS;
-static const uint16_t eoc_timeout = 300;
-static const float adc_offset = 0;
 
-// Calibration variables
-float slope;
-float offset;
-float pHTarget;
+// Buffers
+float pHReadings[WINDOW_SIZE];
 
-// Temperature and humidity variables
-int t; // from DHT22
-int h;
-float Tc; // Temperature (Celsius) computed from thermistor
-float Tf; // Temperature in Fahrenheit (if needed)
-float Tempoffset;  // Temperature compensation offset
-
-// pH sensor reading arrays and index
-float pHReadings[WINDOW_SIZE];    // Circular buffer for raw ADC voltage (mV)
-float pHavg[10];                  // Smoothed pH readings from multiple averages
-float avgValue;
-float pHValue;
-int INDEX = 0;  // Global index for pHReadings
-
-// Additional variables for calibration readings
-float pH4_reading;
-float pH7_reading;
-
-// Thermistor constants and variables
-int Vo;
-const float R1 = 10000.0;
-float R2;
-float logR2, Tcalc;
-const float c1 = 0.0012400, c2 = 0.000209125, c3 = 0.0000002956720;
-
-// Keypad and LCD configuration
+// LCD & keypad
 LiquidCrystal_I2C lcd(0x27, 20, 4);
-const byte ROWS = 4;
-const byte COLS = 3;
-char keys[ROWS][COLS] = {
-  {'1','2','3'},
-  {'4','5','6'},
-  {'7','8','9'},
-  {'.','0','#'}
-};
-byte rowPins[ROWS] = {5, 0, 1, 3};
-byte colPins[COLS] = {4, 6, 2};
+const byte ROWS = 4, COLS = 3;
+char keys[ROWS][COLS] = {{'1','2','3'},{'4','5','6'},{'7','8','9'},{'.','0','#'}};
+byte rowPins[ROWS] = {5,0,1,3};
+byte colPins[COLS] = {4,6,2};
 Keypad_I2C keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS, I2CADDR);
 DHT22 dht22(PIN_DATA);
 
-// Startup graphic for LCD
-byte StartupScreen[] = {
-  B00000,
-  B00110,
-  B01001,
-  B10001,
-  B10001,
-  B01001,
-  B00110,
-  B00000
-};
-
-// Helper Function: Wait for specific key
-void waitForKey(char target) {
-  char key = NO_KEY;
-  while (true) {
-    key = keypad.getKey();
-    if (key == target) {
-      delay(200); // debounce delay
-      break;
-    }
-  }
+// ——— Helpers ———
+void clearRow(uint8_t row) {
+  lcd.setCursor(0, row);
+  for (uint8_t i = 0; i < 20; ++i) lcd.print(' ');
 }
 
-///////////////////////////
-//   Setup & Main Loop   //
-///////////////////////////
-void setup() {
-  lcd.init();
-  lcd.backlight();
+void printCentered(uint8_t row, const String &txt) {
+  const uint8_t LCD_W = 20;
+  uint8_t len   = txt.length();
+  uint8_t start = (len < LCD_W) ? (LCD_W - len) / 2 : 0;
+  clearRow(row);
+  lcd.setCursor(start, row);
+  lcd.print(txt);
+}
 
-  // Display startup screen graphic
-  lcd.setCursor(0, 0);
-  lcd.print("pH Regulator");
-  for (int i = 0; i < 24; i++) {
-    lcd.scrollDisplayRight();
-    delay(60);
+void waitForKey(char target) {
+  char key;
+  while ((key = keypad.getKey()) != target) {
+    // wait
   }
+  delay(200);
+}
 
+// ——— Prototypes ———
+float readLevelPercent();
+int8_t read_adc();
+void display_and_dosing_logic(float pHValue, float Tc, float Tempoffset);
+void startup();
+void setValues();
+void changeMixTime();
+void changePHTolerance();
+void adjustDoseDuration();
+void calibrate();
+float getBufferReading(float offset, float slope);
+
+void setup() {
+  lcd.init(); lcd.backlight();
+  lcd.print("pH Regulator");
+  for (int i = 0; i < 24; i++) { lcd.scrollDisplayRight(); delay(60); }
   Serial.begin(115200);
-
-  // Set pin modes
   pinMode(PumpPin, OUTPUT);
   pinMode(SensorPin, INPUT);
   pinMode(LED, OUTPUT);
-
-  Wire.begin();
-  keypad.begin();
-
-  // Load calibration and process parameters from EEPROM
+  Wire.begin(); keypad.begin();
   EEPROM.get(0, slope);
   EEPROM.get(4, offset);
   EEPROM.get(mixTimeAddress, MixTime);
   EEPROM.get(ToleranceAddress, pHTolerance);
   EEPROM.get(DoseDurationAddress, DoseDuration);
-
-  // Prompt user for target pH (if not set)
-  pH_set_point();
+  EEPROM.get(tankCheckAddress, enforceTankLevel);
+  if (enforceTankLevel != true && enforceTankLevel != false) enforceTankLevel = true;
+  startup();
 }
 
-void loop() {
-  // Update DHT22 readings
-  //t = dht22.getTemperature();
-  //h = dht22.getHumidity();
+unsigned long previousLcdUpdate = 0;
+const unsigned long lcdInterval = 200; // Update LCD every 3 seconds
 
-  delay(500);
+void loop() {
+  delay(200);
+
   char key = keypad.getKey();
   if (key == '.') {
     digitalWrite(PumpPin, HIGH);
@@ -159,317 +154,144 @@ void loop() {
     digitalWrite(PumpPin, LOW);
     digitalWrite(LED, LOW);
   }
-  if (key == '3') { // Restart command
+
+  if (key == '3') {
     lcd.clear();
-    lcd.print("Restarting...");
-    delay(2000);
-    asm volatile ("jmp 0");  // Using software reset for Arduino
-  }
-  if (key == '6') {
-    setValues();  // Enter manual calibration/settings mode
+    lcd.setCursor(5, 0);
+    lcd.print("Restart...");
+    delay(1000);
+    asm volatile("jmp 0"); // Reset Arduino
   }
 
-  // Read pH sensor and update display/dosing logic
-  uint8_t ack = read_adc();
-  if (ack) {
-    Serial.println(F("***** I2C ERROR *****"));
+  if (key == '6') setValues();
+
+  int8_t ack = read_adc();
+  if (ack) Serial.println(F("***** I2C ERROR *****"));
+  else display_and_dosing_logic(pHValue, Tc, Tempoffset);
+}
+
+void display_and_dosing_logic(float pHValue, float Tc, float Tempoffset) {
+  printCentered(0, "Cur pH: " + String(pHValue, 2));
+  printCentered(1, "Tgt pH: " + String(pHTarget, 2));
+  printCentered(2, "Temp: "   + String(Tc, 1) + String((char)223) + "C");
+  printCentered(3, "Tank: "   + String(readLevelPercent(), 1) + "%");
+  if (abs(pHValue - pHTarget) > 4.0) { digitalWrite(PumpPin, LOW); digitalWrite(LED, LOW); return; }
+
+  if (pHValue > pHTarget + pHTolerance) {
+    float level = readLevelPercent();
+    if (enforceTankLevel && level < 35.0) {
+      printCentered(1, "Low Tank: No Dose"); delay(5000);
+      printCentered(1, "Tgt pH: " + String(pHTarget, 2));
+      return;
+    }
+    float scale = constrain(0.5 + (level - 35.0)/65.0, 0.5, 1.5);
+    unsigned long totalMs = (unsigned long)(DoseDuration * scale * 1000UL);
+    unsigned long startMs = millis();
+    printCentered(0, "Dosing...");
+    digitalWrite(PumpPin, HIGH); digitalWrite(LED, HIGH);
+    while (millis() - startMs < totalMs) {
+      unsigned long el = millis() - startMs;
+      uint8_t bar = (el * 20) / totalMs;
+      clearRow(2);
+      lcd.setCursor(0,2);
+      for (uint8_t i=0;i<bar;i++) lcd.write(byte(255));
+      printCentered(3, String((el*100)/totalMs) + "%");
+      delay(200);
+    }
+    digitalWrite(PumpPin, LOW); digitalWrite(LED, LOW); delay(500);
+    lcd.clear();
+    printCentered(0, "Mixing..");
+    unsigned long mixMs = MixTime * 60UL * 1000UL;
+    unsigned long ms0 = millis();
+    while (millis() - ms0 < mixMs) {
+      read_adc(); // <- Get updated pH & temp values
+      float cph = pHReadings[INDEX];
+      float cl = readLevelPercent();
+
+      unsigned long el = millis() - ms0;
+      uint8_t mbar = (el * 20) / mixMs;
+      clearRow(2);
+      lcd.setCursor(0, 2);
+      for (uint8_t i = 0; i < mbar; i++) lcd.write(byte(255));
+
+      uint32_t secs = (mixMs - el) / 1000;
+      String tm = String(secs / 60) + ":" + (secs % 60 < 10 ? "0" : "") + String(secs % 60);
+      printCentered(3, tm);
+
+      printCentered(1, "pH: " + String(cph, 2)); // <- Show pH during mix
+
+      digitalWrite(LED, ((el / 500) & 1) ? HIGH : LOW);
+    }
+
+    digitalWrite(LED, LOW);
+    lcd.clear();
+    unsigned long s0 = millis(); int cnt=0; float sp=0, st=0;
+    while (millis()-s0 < 5000) {
+      read_adc(); float cph=pHReadings[INDEX], cl=readLevelPercent();
+      sp+=cph; st+=cl; cnt++;
+      printCentered(0, "Cur pH: " + String(cph,2));
+      printCentered(3, "Tank: " + String(cl,1) + "%");
+      delay(500);
+    }
+    pHValue = sp/cnt; float lvl2 = st/cnt;
+    printCentered(0, "Cur pH: " + String(pHValue,2));
+    printCentered(1, "Tgt pH: " + String(pHTarget,2));
+    printCentered(2, "Temp: " + String(Tc,1) + String((char)223) + "C");
+    printCentered(3, "Tank: " + String(lvl2,1) + "%");
   }
 }
 
-//////////////////////////////////////////////
-//  pH Reading, Averaging and Temperature   //
-//////////////////////////////////////////////
 int8_t read_adc() {
   int32_t adc_code = 0;
-  float ProbeVoltage = 0;
   uint8_t ack = 0;
+  float ProbeVoltage = 0.0f;
+  const int samples = 2; // Optimized to 5 samples
+  float voltageSum = 0.0f;
 
-  // Read ADC value from pH sensor module
-  ack |= adc_read(i2c_address, &adc_code, eoc_timeout);
-  ProbeVoltage = adc_code_to_voltage(adc_code, adc_vref) * 1000 + adc_offset;
-
-  // Take multiple samples and compute a moving average using a circular buffer
-  for (int a = 0; a < 10; a++) {
-    pHReadings[INDEX] = ProbeVoltage;
-    INDEX = (INDEX + 1) % WINDOW_SIZE;
-    float sum = 0;
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-      sum += pHReadings[i];
-    }
-    pHavg[a] = sum / WINDOW_SIZE;
-    digitalWrite(LED, LOW);
+  for (int i = 0; i < samples; i++) {
+    ack |= adc_read(i2c_addr, &adc_code, eoc_to);
+    ProbeVoltage = adc_code_to_voltage(adc_code, adc_vref) * 1000.0f + adc_offset;
+    voltageSum += ProbeVoltage;
+    delay(5); // Short delay
   }
+  avgValue = voltageSum / samples;
 
-  // Sort the 10 averaged samples to remove extreme values
-  for (int a = 0; a < 9; a++) {
-    for (int b = a + 1; b < 10; b++) {
-      if (pHavg[a] > pHavg[b]) {
-        float tempVal = pHavg[a];
-        pHavg[a] = pHavg[b];
-        pHavg[b] = tempVal;
-      }
-    }
-  }
+  // EEPROM slope/offset already loaded in setup(), no EEPROM calls here
 
-  // Average the middle 6 values for a stable reading
-  avgValue = 0;
-  for (int a = 2; a < 8; a++) {
-    avgValue += pHavg[a];
-  }
+  pHValue = slope * avgValue + offset;
 
-  // Convert voltage to pH value (adjust conversion factor as needed)
-  const float conversionFactor = 5.0 / (-1024.0 * 6.0);
-  pHValue = avgValue * conversionFactor;
-  pHValue = (slope * 3.5 * pHValue + offset);
-
-  // Read thermistor and compute temperature (in Celsius)
   Vo = analogRead(ThermistorPin);
-  R2 = R1 * (1023.0 / (float)Vo - 1.0);
+  R2 = R1 * (1023.0f / float(Vo) - 1.0f);
   logR2 = log(R2);
-  Tcalc = 1.0 / (c1 + c2 * logR2 + c3 * pow(logR2, 3));
-  Tc = Tcalc - 273.15;
-  Tf = (t * 9.0) / 5.0 + 32.0;
-  delay(300);
+  Tcalc = 1.0f / (c1 + c2 * logR2 + c3 * pow(logR2, 3));
+  Tc = Tcalc - 273.15f;
 
-  // Temperature compensation: adjust pH value
-  if (t < 25) {
-    Tempoffset = (25 - Tc) * 0.0010;
-  } else if (t > 25) {
-    Tempoffset = (t - 25) * 0.0015;
-  }
-  if (t > 25)
-    pHValue += Tempoffset;
-  else if (t < 25)
-    pHValue -= Tempoffset;
+  if (Tc < 25.0f) pHValue -= (25.0f - Tc) * 0.0010f;
+  else if (Tc > 25.0f) pHValue += (Tc - 25.0f) * 0.0015f;
 
-  Serial.print("pH: ");
-  Serial.println(pHValue, 2);
-  Serial.print("Voltage: ");
-  Serial.print(ProbeVoltage, 2);
-  Serial.println(" mV");
+  Serial.print("pH: "); Serial.println(pHValue, 2);
+  Serial.print("Avg Voltage: "); Serial.print(avgValue, 2); Serial.println(" mV");
+  Serial.print("Temperature: "); Serial.print(Tc, 2); Serial.println(" C");
 
-  // Update LCD display and dosing logic
-  display_and_dosing_logic(pHValue, Tc, Tempoffset);
+  pHReadings[INDEX] = pHValue;
+  INDEX = (INDEX + 1) % WINDOW_SIZE;
+
   return ack;
 }
 
-//////////////////////////////////////////////
-//  Display & Dosing Logic (with Tank Level)  //
-//////////////////////////////////////////////
-void display_and_dosing_logic(float pHValue, float Tc, float Tempoffset) {
-
-    // Update LCD with current readings
-  lcd.setCursor(4, 0);
-  lcd.print("Cur pH:");
-  lcd.setCursor(12, 0);
-  lcd.print(pHValue, 2);
-
-  lcd.setCursor(4, 1);
-  lcd.print("Tgt pH:");
-  lcd.setCursor(12, 1);
-  lcd.print(pHTarget, 2);
-
-  lcd.setCursor(4, 2);
-  lcd.print("Temp:");
-  lcd.setCursor(12, 2);
-  lcd.print(Tc, 1);
-  lcd.print((char)223); // Degree symbol
-  lcd.print("C");
-
-  // Read and display tank level
-  float tankLevel = readTankLevel();
-  lcd.setCursor(4, 3);
-  lcd.print("Tank:");
-  lcd.setCursor(12, 3);
-  lcd.print(tankLevel, 1);
-  lcd.print("%");
-
-  // Do not dose if the pH is too far off target
-  if (abs(pHValue - pHTarget) > 3.00) {
-    digitalWrite(PumpPin, LOW);
-    digitalWrite(LED, LOW);
-    return;
-  }
-
-  // Dosing logic: if pH is above target+tolerance, dose pH down.
-  // Abort dosing if tank level is below 30%
-  if (pHValue > pHTarget + pHTolerance) {
-    if (tankLevel < 30.0) {
-      Serial.println("Tank level too low. Dosing aborted.");
-      lcd.clear();
-      lcd.setCursor(0, 1);
-      lcd.print("Low Tank: No Dose");
-      return;
-    }
-    
-    float adjustedDoseDuration = DoseDuration;
-    if (tankLevel > 70.0) {
-      adjustedDoseDuration = DoseDuration * 1.5;
-    }
-    
-    digitalWrite(PumpPin, HIGH);
-    digitalWrite(LED, HIGH);
-    lcd.clear();
-    lcd.setCursor(2, 1);
-    lcd.print("*Adding pH Down*");
-    lcd.setCursor(2, 2);
-    lcd.print("Tank: ");
-    lcd.print(tankLevel, 1);
-    lcd.print("%");
-    lcd.setCursor(6, 3);
-    lcd.print(adjustedDoseDuration);
-    lcd.print(" sec");
-
-    Serial.print("Dosing for ");
-    Serial.print(adjustedDoseDuration);
-    Serial.println(" seconds.");
-
-    delay(adjustedDoseDuration * 1000);
-    digitalWrite(PumpPin, LOW);
-    delay(3000);
-    digitalWrite(LED, LOW);
-    lcd.clear();
-
- // Mixing period: update display during the mix without clearing the whole screen
- for (int i = MixTime * 60; i > 0; i--) {
-  // Update current pH reading
-  pHValue = get_pH_reading();
-
-  // Update Mixing Time on line 3 (fixed format: MM:SS)
-  lcd.setCursor(1, 3);
-  lcd.print("Mixing Time: ");
-  lcd.print(i / 60);
-  lcd.print(":");
-  if (i % 60 < 10) lcd.print("0");
-  lcd.print(i % 60);
-
-  // Update Current pH on line 0 (overwrite previous value)
-  lcd.setCursor(2, 0);
-  lcd.print("Current pH: ");
-  // Clear previous numeric value (assumes up to 7 characters)
-  lcd.print("       ");
-  lcd.setCursor(14, 0);  // Adjust cursor to overwrite numeric portion
-  lcd.print(pHValue, 2);
-
-  // Update Target pH on line 1 (overwrite previous value)
-  lcd.setCursor(2, 1);
-  lcd.print("Target pH: ");
-  lcd.print("      ");  // Clear previous numeric value
-  lcd.setCursor(14, 1);
-  lcd.print(pHTarget, 1);
-
-  // Optional: Flash LED for visual effect
-  digitalWrite(LED, LOW);
-  delay(1000);
-  digitalWrite(LED, HIGH);
-
-  // Check for manual dosing or restart commands during mix
-  char key = keypad.getKey();
-  if (key == '.') {
-    digitalWrite(PumpPin, HIGH);
-    digitalWrite(LED, HIGH);
-    delay(4500);
-    digitalWrite(PumpPin, LOW);
-    digitalWrite(LED, LOW);
-  } else {
-    digitalWrite(PumpPin, LOW);
-    digitalWrite(LED, LOW);
-  }
-  if (key == '3') {
-    lcd.clear();
-    lcd.print("Restarting...");
-    delay(2000);
-    asm volatile ("jmp 0");
-   }  
-  }
-  lcd.clear();
- }
+float readLevelPercent() {
+  long tot=0; for(int i=0;i<10;i++){ tot+=analogRead(tankSensorPin); delay(5);} 
+  float raw=tot/10.0;
+  float V = raw*(ADC_REF_V/1023.0);
+  float P = constrain((V-SENSOR_OFFSET_V)*(SENSOR_MAX_P/SENSOR_SPAN_V),0.0,SENSOR_MAX_P);
+  float h = P/0.0098;
+  float lvl=constrain((h/MAX_TANK_HEIGHT)*100.0,0.0,100.0);
+  static float s=lvl;
+  s = ALPHA*lvl + (1-ALPHA)*s;
+  return s;
 }
 
-
-float get_pH_reading() {
-  int32_t adc_code = 0;
-  float ProbeVoltage = 0;
-  uint8_t ack = 0;
-
-  // Read ADC value from pH sensor module
-  ack |= adc_read(i2c_address, &adc_code, eoc_timeout);
-  ProbeVoltage = adc_code_to_voltage(adc_code, adc_vref) * 1000 + adc_offset;
-
-  // Take multiple samples and compute a moving average using a circular buffer
-  for (int a = 0; a < 10; a++) {
-    pHReadings[INDEX] = ProbeVoltage;
-    INDEX = (INDEX + 1) % WINDOW_SIZE;
-    float sum = 0;
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-      sum += pHReadings[i];
-    }
-    pHavg[a] = sum / WINDOW_SIZE;
-    digitalWrite(LED, LOW);
-  }
-
-  // Sort the 10 averaged samples to remove extreme values
-  for (int a = 0; a < 9; a++) {
-    for (int b = a + 1; b < 10; b++) {
-      if (pHavg[a] > pHavg[b]) {
-        float tempVal = pHavg[a];
-        pHavg[a] = pHavg[b];
-        pHavg[b] = tempVal;
-      }
-    }
-  }
-
-  // Average the middle 6 values for a stable reading
-  float avgVal = 0;
-  for (int a = 2; a < 8; a++) {
-    avgVal += pHavg[a];
-  }
-
-  // Convert voltage to pH value (adjust conversion factor as needed)
-  const float conversionFactor = 5.0 / (-1024.0 * 6.0);
-  float currentPH = avgVal * conversionFactor;
-  currentPH = (slope * 3.5 * currentPH + offset);
-
-  // Read thermistor and compute temperature (in Celsius)
-  Vo = analogRead(ThermistorPin);
-  R2 = R1 * (1023.0 / (float)Vo - 1.0);
-  logR2 = log(R2);
-  Tcalc = 1.0 / (c1 + c2 * logR2 + c3 * pow(logR2, 3));
-  Tc = Tcalc - 273.15;
-  Tf = (t * 9.0) / 5.0 + 32.0;
-  delay(300);
-
-  // Temperature compensation: adjust pH value
-  if (t < 25) {
-    Tempoffset = (25 - Tc) * 0.0010;
-  } else if (t > 25) {
-    Tempoffset = (t - 25) * 0.0015;
-  }
-  if (t > 25)
-    currentPH += Tempoffset;
-  else if (t < 25)
-    currentPH -= Tempoffset;
-
-  return currentPH;
-}
-
-
-//////////////////////////////////////////////
-//        Tank Level Reading Function       //
-//////////////////////////////////////////////
-float readTankLevel() {
-  int sensorValue = analogRead(tankSensorPin);
-  float levelPercent = (sensorValue / 1023.0) * 100.0;
-  Serial.print("Tank Level: ");
-  Serial.print(levelPercent, 1);
-  Serial.println("%");
-  return levelPercent;
-}
-
-//////////////////////////////////////////////
-//           User Input Menu                //
-//////////////////////////////////////////////
-void pH_set_point() {
+void startup() {
   lcd.clear();
   lcd.setCursor(2, 0);
   lcd.print("Enter PH Target.");
@@ -559,17 +381,13 @@ void pH_set_point() {
       lcd.setCursor(5, 0);
       lcd.print("Restart...");
       delay(1000);
-      pH_set_point(); // Re-run target entry
+      startup(); // Re-run target entry
       lcd.clear();
       return;
     }
   }
 }
 
-//////////////////////////////////////////////
-//         Calibration Functions            //
-//////////////////////////////////////////////
-// Manual calibration: user enters new slope and offset
 void setValues() {
   lcd.clear();
   lcd.setCursor(0, 1);
@@ -596,7 +414,7 @@ void setValues() {
       break;
     }
     if (key != NO_KEY) {
-      lcd.setCursor(8, 1);
+      lcd.setCursor(5, 2);
       input[i++] = key;
       lcd.setCursor(column, 0);
       lcd.print(key);
@@ -647,7 +465,6 @@ void setValues() {
   asm volatile ("jmp 0");  // Software reset for Arduino
 }
 
-// Adjust dose duration (user input)
 void adjustDoseDuration() {
   lcd.clear();
   lcd.setCursor(3, 0);
@@ -678,7 +495,6 @@ void adjustDoseDuration() {
   return;
 }
 
-// Change pH tolerance (user input)
 void changePHTolerance() {
   lcd.clear();
   lcd.print("Enter pH Tolerance:");
@@ -707,7 +523,6 @@ void changePHTolerance() {
   adjustDoseDuration();
 }
 
-// Change mix time (user input) and then pH tolerance and dose duration
 void changeMixTime() {
   lcd.clear();
   lcd.print("Enter Mix Time:");
@@ -736,140 +551,144 @@ void changeMixTime() {
   changePHTolerance();
 }
 
-// Calibration process with three modes: Manual, Auto, or Mix/Tolerance/Dose
 void calibrate() {
   lcd.clear();
-  lcd.setCursor(2, 0);
-  lcd.print("Calibration Mode");
+  printCentered(0, "Calibration Mode");
   delay(500);
-  
-  lcd.setCursor(0, 1);
-  lcd.print("1:Manual 2:Auto");
-  lcd.setCursor(0, 2);
-  lcd.print("3:Mix/Tol/Dose");
-  
+
+  printCentered(1, "1:Manual 2:Auto");
+  printCentered(2, "3:Mix/Tol/Dose");
+  printCentered(3, "4:Tank Check Toggle");
+
   char key = NO_KEY;
-  while ((key = keypad.getKey()) == NO_KEY) {
-    // Wait for input
-  }
-  
-  if (key == '1') {
-    lcd.clear();
-    setValues();
-    lcd.clear();
-    return;
-  } else if (key == '3') {
-    lcd.clear();
-    changeMixTime();
-    lcd.clear();
-    return;
-  } else if (key == '2') {
-    // Auto Calibration
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("Immerse in pH4");
-    lcd.setCursor(0, 2);
-    lcd.print("Press 1 when ready");
-    waitForKey('1');
+  while ((key = keypad.getKey()) == NO_KEY) {}
 
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("Reading pH4...");
-    float reading_pH4 = getBufferReading(offset, slope);
-    delay(1500);
-
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("pH4: ");
-    lcd.print(reading_pH4, 2);
-    delay(1500);
-
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("Immerse in pH7");
-    lcd.setCursor(0, 2);
-    lcd.print("Press 1 when ready");
-    waitForKey('1');
-
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("Reading pH7...");
-    float reading_pH7 = getBufferReading(offset, slope);
-    delay(1500);
-
-    lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("pH7: ");
-    lcd.print(reading_pH7, 2);
-    delay(1500);
-
-    // Validate readings (adjust thresholds as needed)
-    bool valid = true;
-    if (reading_pH4 < 3.0 || reading_pH4 > 5.0) {
+  switch (key) {
+    case '4':
+      enforceTankLevel = !enforceTankLevel;
+      EEPROM.put(tankCheckAddress, enforceTankLevel);
+      EEPROM.get(tankCheckAddress, enforceTankLevel);
       lcd.clear();
-      lcd.print("pH4 reading error!");
-      valid = false;
-    }
-    if (reading_pH7 < 5.0 || reading_pH7 > 9.0) {
-      lcd.clear();
-      lcd.print("pH7 reading error!");
-      valid = false;
-    }
-    if (!valid) {
-      delay(3000);
-      lcd.clear();
-      lcd.print("Retry calibration");
+      printCentered(1, "Tank Check:");
+      printCentered(2, enforceTankLevel ? "ENABLED" : "DISABLED");
       delay(2000);
-      calibrate();
+      asm volatile("jmp 0");
+      break;
+
+    case '1':
+      lcd.clear();
+      setValues();
       return;
-    }
 
-    float newSlope = (reading_pH7 - reading_pH4) / 3.0;
-    float newOffset = reading_pH4 - (newSlope * 4.0);
-    EEPROM.put(0, newSlope);
-    EEPROM.put(4, newOffset);
-    EEPROM.get(0, slope);
-    EEPROM.get(4, offset);
+    case '3':
+      lcd.clear();
+      changeMixTime();
+      return;
 
+    case '2': {
+      // Auto Calibration
+      float reading_pH4 = 0.0f, reading_pH7 = 0.0f;
+
+       // pH 4 Calibration
+  lcd.clear();
+  printCentered(0, "Immerse in pH4");
+  printCentered(3, "Press '1' ready");
+
+  // Show live pH while waiting for '1'
+  char key = NO_KEY;
+  while ((key = keypad.getKey()) != '1') {
+    read_adc(); // get real-time pH reading
+    printCentered(1, "Cur pH: " + String(pHValue, 2));
+    printCentered(2, "Voltage: " + String(avgValue, 1) + "mV");
+    delay(250); // Update 4 times per second
+  }
+
+  lcd.clear();
+  printCentered(1, "Reading pH4...");
+  reading_pH4 = getBufferReading();
+  lcd.clear();
+  printCentered(1, "pH4 Voltage:");
+  printCentered(2, String(reading_pH4, 2) + " mV");
+  delay(2000);
+
+  // pH 7 Calibration
+  lcd.clear();
+  printCentered(0, "Immerse in pH7");
+  printCentered(3, "Press '1' ready");
+
+  // Show live pH while waiting for '1'
+  key = NO_KEY;
+  while ((key = keypad.getKey()) != '1') {
+    read_adc(); // real-time reading
+    printCentered(1, "Cur pH: " + String(pHValue, 2));
+    printCentered(2, "Voltage: " + String(avgValue, 1) + "mV");
+    delay(250);
+  }
+
+  lcd.clear();
+  printCentered(1, "Reading pH7...");
+  reading_pH7 = getBufferReading();
+  lcd.clear();
+  printCentered(1, "pH7 Voltage:");
+  printCentered(2, String(reading_pH7, 2) + " mV");
+  delay(2000);
+
+  // Validate realistic voltage values
+  if (abs(reading_pH7 - reading_pH4) < 100.0f) {
     lcd.clear();
-    lcd.setCursor(0, 1);
-    lcd.print("New Slope: ");
-    lcd.print(slope, 2);
-    lcd.setCursor(0, 2);
-    lcd.print("New Offset: ");
-    lcd.print(offset, 2);
-    delay(5000);
-    return;
+    printCentered(1, "Calibration Error!");
+    printCentered(2, "Retrying...");
+    delay(3000);
+    return calibrate();  // Retry
+  }
+
+  // Calculate and save slope/offset accurately
+  float newSlope = (7.0f - 4.0f) / (reading_pH7 - reading_pH4);
+  float newOffset = 7.0f - (newSlope * reading_pH7);
+
+  EEPROM.put(0, newSlope);
+  EEPROM.put(4, newOffset);
+  slope = newSlope;
+  offset = newOffset;
+
+  lcd.clear();
+  printCentered(0, "Calibration Done!");
+  lcd.setCursor(0, 2);
+  lcd.print("Slope: "); lcd.print(slope, 4);
+  lcd.setCursor(0, 3);
+  lcd.print("Offset: "); lcd.print(offset, 2);
+  delay(5000);
+  return;
+ }
+
+    default:
+      lcd.clear();
+      printCentered(1, "Invalid Option");
+      delay(2000);
+      return;
   }
 }
 
-// Buffer reading: average multiple ADC samples to obtain a stable pH value
-float getBufferReading(float offset, float slope) {
-  const int numReadings = 10;
-  float sumVoltages = 0;
+float getBufferReading() {
+  const int numReadings = 20;
+  float sumVoltages = 0.0f;
+  int32_t adc_code = 0;
+
   for (int i = 0; i < numReadings; i++) {
-    int32_t adc_code = 0;
-    uint8_t ack = adc_read(i2c_address, &adc_code, eoc_timeout);
-    float ProbeVoltage = adc_code_to_voltage(adc_code, adc_vref) * 1000 + adc_offset;
+    adc_read(i2c_addr, &adc_code, eoc_to);
+    float ProbeVoltage = adc_code_to_voltage(adc_code, adc_vref) * 1000.0f + adc_offset;
     sumVoltages += ProbeVoltage;
     delay(100);
   }
+
   float avgVoltage = sumVoltages / numReadings;
-  float local_pH = avgVoltage * (5.0 / (-1024.0 * 6.0));
-  local_pH = (1.1 * 3.5 * local_pH + 6.00);
-  
-  // Temperature compensation
-  if (t < 25) {
-    Tempoffset = (25 - Tc) * 0.0010;
-  } else if (t > 25) {
-    Tempoffset = (t - 25) * 0.0015;
-  }
-  if (t > 25)
-    local_pH += Tempoffset;
-  else
-    local_pH -= Tempoffset;
-  
-  Serial.print("Buffer pH: ");
-  Serial.println(local_pH, 2);
-  return local_pH;
+
+  Serial.print("Calibration Voltage: ");
+  Serial.print(avgVoltage, 2);
+  Serial.println(" mV");
+
+  return avgVoltage;  // Return averaged voltage (mV)
 }
+
+
+
