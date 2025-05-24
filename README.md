@@ -52,14 +52,14 @@ Keypad-driven resets ensure fast configuration changes
 
 ESP8266
 
-I2C pH Sensor (ADC)
+-I2C pH Sensor (ADC)
 
-DHT22 Temperature Sensor
+-DHT22 Temperature Sensor
 
-20x4 I2C LCD Display
+-20x4 I2C LCD Display
 
-I2C Keypad 
+-I2C Keypad 
 
-Analog Pressure Sensor (Optional)
+-Analog Pressure Sensor (Optional)
 
-Relay module
+-Relay module
