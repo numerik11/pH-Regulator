@@ -50,11 +50,14 @@ Keypad-driven resets ensure fast configuration changes
 🔧 Hardware Requirements
 
 
+
 -Aduino Uno
 
--12vDC AC/DC Adaptor
+-12v AC/DC Adaptor
 
--I2C pH Sensor (ADC)
+-Buck Convertor 
+
+-I2C pH Sensor (ADC) and good quality pH Probe
 
 -DHT22 Temperature Sensor
 
@@ -64,4 +67,11 @@ Keypad-driven resets ensure fast configuration changes
 
 -Analog Pressure Sensor (Optional)
 
--Relay module
+-Parasidic pump
+
+-5v Relay module
+
+
+
+![pH Reg](https://github.com/user-attachments/assets/ec10667a-b4d3-46e3-af85-576bc69abe67)
+
