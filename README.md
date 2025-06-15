@@ -1,11 +1,9 @@
 🌿 pH-Regulator
 
-
-An Arduino based pH regulation system using an I2C pH sensor, DHT22, and 20x4 LCD interface. Designed for hydroponics, aquaponics, and water dosing automation with real-time feedback and calibration.
+An Arduino based pH regulation system using an I2C pH sensor, DHT22, and 20x4 LCD interface. Designed for hydroponics, and aquaponics with real-time feedback and calibration.
 
 
 📦 Features
-
 
 Accurate pH Measurement
 
