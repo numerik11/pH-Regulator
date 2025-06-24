@@ -50,24 +50,23 @@ Keypad-driven resets ensure fast configuration changes
 
 
 -Aduino Uno
+- I2C pH Sensor (ADC) and quality pH Probe
 
--12v AC/DC Adaptor
+- I2C Keypad 
 
--Buck Convertor 
+- I2C LCD Display 20x4
 
--I2C pH Sensor (ADC) and good quality pH Probe
+- 12v AC/DC Adaptor
+ 
+- Buck Convertor 
 
--DHT22 Temperature Sensor
+- DHT22 Temperature Sensor
 
--20x4 I2C LCD Display
+- Analog Pressure Sensor (Optional)
 
--I2C Keypad 
+- Parasidic pump
 
--Analog Pressure Sensor (Optional)
-
--Parasidic pump
-
--5v Relay module
+- 5v Relay module
 
 
 
