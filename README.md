@@ -17,8 +17,6 @@ An Arduino based pH regulation system using an I2C pH sensor, DHT22, and 20x4 LC
 
 - I2C Keypad Control
 
-- User-friendly menu for calibration, parameter entry, and adjustments
-
 - Soft restart support via keypad
 
 - Calibration Options
@@ -45,7 +43,7 @@ An Arduino based pH regulation system using an I2C pH sensor, DHT22, and 20x4 LC
 
 - Keypad-driven resets ensure fast configuration changes
 
-
+----
 
 🔧 Hardware Requirements
 
@@ -70,7 +68,7 @@ An Arduino based pH regulation system using an I2C pH sensor, DHT22, and 20x4 LC
 
 - 5v Relay module
 
-
+----
 
 ![pH Reg](https://github.com/user-attachments/assets/ec10667a-b4d3-46e3-af85-576bc69abe67)
 
