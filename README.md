@@ -1,7 +1,7 @@
 🌿 pH-Down-Regulator 🌿
 ----
 
-An Arduino based pH display/regulation system using an I2C pH sensor, pH probe, Parasidic Pump, Level sensor (for dose ajustment less when low) and 20x4 LCD interface to display pH and calibrate/setup controller. Gradually adds pH-down soulution to input target as pH rises naturally.
+An Arduino based pH display/regulation system using an I2C pH sensor, pH probe, Parasidic Pump, Level sensor (for dose adjustment less when low) and 20x4 LCD interface to display pH and calibrate/setup controller. Gradually adds pH-down soulution to input target as pH rises naturally.
 
 ----
 
